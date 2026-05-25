@@ -1,0 +1,9 @@
+fastapi
+uvicorn[standard]
+python-dotenv
+requests
+httpx
+cryptography
+google-api-python-client
+google-auth-httplib2
+google-auth-oauthlib

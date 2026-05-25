@@ -1,0 +1,28 @@
+services:
+  app:
+    build: .
+    restart: unless-stopped
+    ports:
+      - '8000:8000'
+    environment:
+      CHANNEL_ID: ${CHANNEL_ID}
+      CHANNEL_SECRET: ${CHANNEL_SECRET}
+      LINE_ALLOWED_USER_ID: ${LINE_ALLOWED_USER_ID}
+      LINE_ALLOWED_GROUP_IDS: ${LINE_ALLOWED_GROUP_IDS}
+      LINE_TRIGGER_PHRASES: ${LINE_TRIGGER_PHRASES}
+      ADMIN_API_KEY: ${ADMIN_API_KEY}
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET}
+      GOOGLE_REDIRECT_URI: ${GOOGLE_REDIRECT_URI}
+      GOOGLE_CALENDAR_ID: ${GOOGLE_CALENDAR_ID}
+      DATABASE_URL: ${DATABASE_URL:-sqlite:///./data/sunshine.db}
+      MAX_WEBHOOK_BODY_BYTES: ${MAX_WEBHOOK_BODY_BYTES:-1048576}
+      MAX_EVENT_AGE_SECONDS: ${MAX_EVENT_AGE_SECONDS:-600}
+    volumes:
+      - ./data:/app/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s

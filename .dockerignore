@@ -1,0 +1,10 @@
+.env
+.env.local
+.git
+.gitignore
+__pycache__/
+*.pyc
+data/
+.venv/
+venv/
+node_modules/
