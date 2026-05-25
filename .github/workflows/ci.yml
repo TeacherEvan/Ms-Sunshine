@@ -1,0 +1,44 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Validate environment contract
+        env:
+          CHANNEL_ID: test-channel-id
+          CHANNEL_SECRET: test-channel-secret
+          LINE_ALLOWED_USER_ID: U1234567890abcdef1234567890abcdef
+          LINE_TRIGGER_PHRASES: sunshine,Ms Sunshine
+          ADMIN_API_KEY: test-admin-key
+          GOOGLE_CLIENT_ID: test-google-client-id
+          GOOGLE_CLIENT_SECRET: test-google-client-secret
+          GOOGLE_REDIRECT_URI: http://localhost:8000/auth/google/callback
+          GOOGLE_CALENDAR_ID: primary
+          DATABASE_URL: sqlite:///./data/ci.db
+        run: |
+          python scripts/validate_env.py
+
+      - name: Compile
+        run: |
+          python -m py_compile app/main.py scripts/validate_env.py scripts/google_oauth_url.py scripts/redact_env.py tests/test_app.py
+
+      - name: Test
+        run: pytest -q

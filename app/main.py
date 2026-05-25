@@ -13,16 +13,65 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
 
+from dotenv import load_dotenv
 from fastapi import FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_DB_PATH = PROJECT_ROOT / "data" / "sunshine.db"
+load_dotenv(PROJECT_ROOT / ".env")
+
 GOOGLE_SCOPES = ("https://www.googleapis.com/auth/calendar.events",)
 MAX_BODY_BYTES_DEFAULT = 1_048_576
 MAX_EVENT_AGE_SECONDS_DEFAULT = 600
 
-app = FastAPI(title="Ms Sunshine")
+
+class ConfigError(RuntimeError):
+    pass
+
+
+def env_flag(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def parse_csv(raw: str, *, lower: bool = False) -> list[str]:
+    values = []
+    for item in raw.split(","):
+        value = " ".join(item.strip().split())
+        if not value:
+            continue
+        values.append(value.lower() if lower else value)
+    return values
+
+
+def parse_positive_int(raw: str | None, default: int) -> int:
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    return value if value > 0 else default
+
+
+def build_app() -> FastAPI:
+    docs_enabled = env_flag("ENABLE_API_DOCS", False)
+    app_instance = FastAPI(
+        title="Ms Sunshine",
+        docs_url="/docs" if docs_enabled else None,
+        redoc_url="/redoc" if docs_enabled else None,
+        openapi_url="/openapi.json" if docs_enabled else None,
+    )
+    allowed_hosts = parse_csv(os.getenv("ALLOWED_HOSTS", ""))
+    if allowed_hosts:
+        app_instance.add_middleware(TrustedHostMiddleware, allowed_hosts=allowed_hosts)
+    return app_instance
+
+
+app = build_app()
 
 
 @dataclass(frozen=True)
@@ -74,32 +123,11 @@ def get_settings() -> Settings:
     )
 
 
-def parse_csv(raw: str, *, lower: bool = False) -> list[str]:
-    values = []
-    for item in raw.split(","):
-        value = " ".join(item.strip().split())
-        if not value:
-            continue
-        values.append(value.lower() if lower else value)
-    return values
-
-
-def parse_positive_int(raw: str | None, default: int) -> int:
-    if not raw:
-        return default
-    try:
-        value = int(raw)
-    except ValueError:
-        return default
-    return value if value > 0 else default
-
-
 def resolve_sqlite_path(database_url: str) -> Path:
     prefix = "sqlite:///"
-    if database_url.startswith(prefix):
-        raw_path = database_url[len(prefix) :]
-    else:
-        raw_path = database_url
+    if "://" in database_url and not database_url.startswith(prefix):
+        raise ConfigError("Only sqlite:/// DATABASE_URL values are supported in this build")
+    raw_path = database_url[len(prefix) :] if database_url.startswith(prefix) else database_url
     path = Path(raw_path)
     if not path.is_absolute():
         path = (PROJECT_ROOT / path).resolve()
@@ -112,6 +140,18 @@ def redact(value: str) -> str:
     if len(value) <= 8:
         return "***"
     return value[:4] + "…" + value[-4:]
+
+
+def redact_database_url(database_url: str) -> str:
+    if database_url.startswith("sqlite:///"):
+        return database_url
+    if "://" not in database_url:
+        return database_url
+    scheme, rest = database_url.split("://", 1)
+    if "@" not in rest:
+        return database_url
+    _, host_part = rest.rsplit("@", 1)
+    return f"{scheme}://***:***@{host_part}"
 
 
 def settings_errors(settings: Settings) -> list[str]:
@@ -185,7 +225,7 @@ def parse_payload(body: bytes) -> dict[str, Any]:
 def is_recent_event(event: dict[str, Any], settings: Settings) -> bool:
     timestamp = event.get("timestamp")
     if not isinstance(timestamp, int):
-        return True
+        return False
     now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
     age_ms = now_ms - timestamp
     return 0 <= age_ms <= settings.max_event_age_seconds * 1000
@@ -271,6 +311,15 @@ def init_db(settings: Settings) -> None:
         )
 
 
+def can_open_db(settings: Settings) -> bool:
+    try:
+        with connect_db(settings) as connection:
+            connection.execute("SELECT 1")
+        return True
+    except sqlite3.Error:
+        return False
+
+
 def save_event(event: LineMessageEvent, settings: Settings) -> bool:
     try:
         with connect_db(settings) as connection:
@@ -293,20 +342,21 @@ def startup() -> None:
     init_db(settings)
 
 
-@app.get("/health")
+@app.get("/health", include_in_schema=False)
 def health() -> dict[str, bool]:
     return {"ok": True}
 
 
-@app.get("/ready")
+@app.get("/ready", include_in_schema=False)
 def ready() -> JSONResponse:
     settings = get_settings()
     errors = settings_errors(settings)
-    status_code = 200 if not errors else 503
-    return JSONResponse({"ok": not errors, "error_count": len(errors)}, status_code=status_code)
+    healthy = not errors and can_open_db(settings)
+    status_code = 200 if healthy else 503
+    return JSONResponse({"ok": healthy}, status_code=status_code)
 
 
-@app.get("/admin/config")
+@app.get("/admin/config", include_in_schema=False)
 def admin_config(x_admin_key: str | None = Header(default=None)) -> dict[str, Any]:
     settings = get_settings()
     ensure_admin(x_admin_key, settings)
@@ -319,15 +369,14 @@ def admin_config(x_admin_key: str | None = Header(default=None)) -> dict[str, An
             "LINE_ALLOWED_USER_ID": redact(settings.allowed_user_id),
             "LINE_ALLOWED_GROUP_IDS": len(settings.allowed_group_ids),
             "LINE_TRIGGER_PHRASES": list(settings.trigger_phrases),
-            "DATABASE_PATH": str(settings.db_path),
+            "DATABASE_URL": redact_database_url(settings.database_url),
             "GOOGLE_CLIENT_ID": redact(settings.google_client_id),
-            "GOOGLE_REDIRECT_URI": settings.google_redirect_uri,
             "GOOGLE_CALENDAR_ID": redact(settings.google_calendar_id),
         },
     }
 
 
-@app.get("/admin/google/oauth-url")
+@app.get("/admin/google/oauth-url", include_in_schema=False)
 def admin_google_oauth_url(
     x_admin_key: str | None = Header(default=None),
     state: str = Query(default="sunshine-google-oauth"),
@@ -350,7 +399,7 @@ def admin_google_oauth_url(
     return {"url": f"https://accounts.google.com/o/oauth2/v2/auth?{query}"}
 
 
-@app.post("/webhook/line")
+@app.post("/webhook/line", include_in_schema=False)
 async def line_webhook(request: Request, x_line_signature: str | None = Header(default=None)) -> dict[str, int]:
     settings = get_settings()
     body = await request.body()
@@ -379,8 +428,8 @@ async def line_webhook(request: Request, x_line_signature: str | None = Header(d
     return {"accepted": accepted, "ignored": ignored}
 
 
-@app.get("/notes")
-def notes(
+@app.get("/admin/notes", include_in_schema=False)
+def admin_notes(
     x_admin_key: str | None = Header(default=None),
     limit: int = Query(default=50, ge=1, le=200),
 ) -> dict[str, list[dict[str, Any]]]:

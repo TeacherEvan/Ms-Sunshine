@@ -10,19 +10,20 @@ Current capabilities
 - stores accepted notes and placeholder tasks in SQLite
 - exposes admin-only endpoints with an API key
 - generates a Google OAuth consent URL for calendar setup
+- disables docs/OpenAPI by default
 
 Endpoints
 - GET /health
   - liveness only
 - GET /ready
-  - readiness; returns 503 if required config is missing
+  - readiness; returns 503 if required config or DB access is broken
 - POST /webhook/line
   - LINE webhook endpoint
 - GET /admin/config
   - admin-only redacted config/status
 - GET /admin/google/oauth-url
   - admin-only Google consent URL generator
-- GET /notes
+- GET /admin/notes
   - admin-only note listing
 
 Required environment variables
@@ -41,6 +42,13 @@ Optional environment variables
 - DATABASE_URL
 - MAX_WEBHOOK_BODY_BYTES
 - MAX_EVENT_AGE_SECONDS
+- ENABLE_API_DOCS
+- ALLOWED_HOSTS
+
+Important constraints
+- This build supports sqlite:/// DATABASE_URL only.
+- Google Calendar token exchange, callback handling, and token persistence are not implemented yet.
+- The current task record is a placeholder derived from the accepted note text.
 
 LINE setup
 1. Create a Messaging API channel in LINE Developers.
@@ -67,8 +75,8 @@ Local run
    - pip install -r requirements.txt
 3. Validate env:
    - python scripts/validate_env.py
-4. Start:
-   - uvicorn app.main:app --host 0.0.0.0 --port 8000
+4. Start with env file loaded:
+   - uvicorn app.main:app --host 0.0.0.0 --port 8000 --env-file .env
 
 Docker run
 - docker compose up --build
@@ -78,12 +86,13 @@ Admin usage
 - examples:
   - curl -H 'X-Admin-Key: ...' http://localhost:8000/admin/config
   - curl -H 'X-Admin-Key: ...' http://localhost:8000/admin/google/oauth-url
-  - curl -H 'X-Admin-Key: ...' http://localhost:8000/notes
+  - curl -H 'X-Admin-Key: ...' http://localhost:8000/admin/notes
 
-Notes
-- Google Calendar token exchange, callback handling, and token persistence are not implemented yet.
-- The current task record is a placeholder derived from the accepted note text.
-- Keep .env out of git.
+Deployment guidance
+- expose only /webhook/line publicly if possible
+- keep admin endpoints behind internal networking, VPN, or reverse-proxy restrictions
+- leave ENABLE_API_DOCS unset in production
+- set ALLOWED_HOSTS to your production hostname(s)
 
 License
 - MIT. See LICENSE.
