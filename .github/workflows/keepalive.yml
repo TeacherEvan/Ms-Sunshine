@@ -1,0 +1,30 @@
+name: keepalive
+
+on:
+  schedule:
+    - cron: '*/10 * * * *'
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check keepalive configuration
+        env:
+          KEEPALIVE_URL: ${{ vars.KEEPALIVE_URL }}
+        run: |
+          if [ -z "$KEEPALIVE_URL" ]; then
+            echo "Repository variable KEEPALIVE_URL is required."
+            exit 1
+          fi
+
+      - name: Ping bot health endpoint
+        env:
+          KEEPALIVE_URL: ${{ vars.KEEPALIVE_URL }}
+        run: |
+          curl --fail --show-error --silent --location \
+            --max-time 30 \
+            --retry 2 \
+            --retry-all-errors \
+            "$KEEPALIVE_URL"
