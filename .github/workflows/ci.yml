@@ -41,4 +41,4 @@ jobs:
           python -m py_compile app/main.py scripts/validate_env.py scripts/google_oauth_url.py scripts/redact_env.py tests/test_app.py
 
       - name: Test
-        run: pytest -q
+        run: python -m pytest -q
