@@ -155,8 +155,7 @@ def test_ready_reflects_config_and_health_is_liveness(monkeypatch: pytest.Monkey
     assert health.json() == {"ok": True}
     client.close()
 
-    monkeypatch.delenv("CHANNEL_SECRET", raising=False)
-    main = load_app(monkeypatch)
+    main = load_app(monkeypatch, {"CHANNEL_SECRET": ""})
     client = TestClient(main.app)
     ready = client.get("/ready")
     health = client.get("/health")

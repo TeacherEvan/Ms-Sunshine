@@ -1,0 +1,1 @@
+"""Ms Sunshine application package."""

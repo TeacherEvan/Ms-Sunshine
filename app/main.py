@@ -6,11 +6,12 @@ import hmac
 import json
 import os
 import sqlite3
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
+from typing import Any, AsyncIterator
 from urllib.parse import urlencode
 
 from dotenv import load_dotenv
@@ -28,6 +29,13 @@ MAX_EVENT_AGE_SECONDS_DEFAULT = 600
 
 class ConfigError(RuntimeError):
     pass
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+    settings = get_settings()
+    init_db(settings)
+    yield
 
 
 def env_flag(name: str, default: bool = False) -> bool:
@@ -64,6 +72,7 @@ def build_app() -> FastAPI:
         docs_url="/docs" if docs_enabled else None,
         redoc_url="/redoc" if docs_enabled else None,
         openapi_url="/openapi.json" if docs_enabled else None,
+        lifespan=lifespan,
     )
     allowed_hosts = parse_csv(os.getenv("ALLOWED_HOSTS", ""))
     if allowed_hosts:
@@ -334,13 +343,6 @@ def save_event(event: LineMessageEvent, settings: Settings) -> bool:
         return True
     except sqlite3.IntegrityError:
         return False
-
-
-@app.on_event("startup")
-def startup() -> None:
-    settings = get_settings()
-    init_db(settings)
-
 
 @app.get("/health", include_in_schema=False)
 def health() -> dict[str, bool]:

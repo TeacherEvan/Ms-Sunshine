@@ -1,0 +1,66 @@
+name: keepalive
+
+on:
+  schedule:
+    - cron: '*/10 * * * *'
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: keepalive
+  cancel-in-progress: false
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      KEEPALIVE_URL: ${{ vars.KEEPALIVE_URL }}
+      KEEPALIVE_METHOD: ${{ vars.KEEPALIVE_METHOD || 'GET' }}
+      KEEPALIVE_EXPECTED_STATUS: ${{ vars.KEEPALIVE_EXPECTED_STATUS || '200' }}
+      KEEPALIVE_AUTH_HEADER: ${{ secrets.KEEPALIVE_AUTH_HEADER }}
+    steps:
+      - name: Check keepalive configuration
+        run: |
+          if [ -z "$KEEPALIVE_URL" ]; then
+            echo "Repository variable KEEPALIVE_URL is required."
+            exit 1
+          fi
+          case "$KEEPALIVE_METHOD" in
+            GET|HEAD)
+              ;;
+            *)
+              echo "KEEPALIVE_METHOD must be GET or HEAD."
+              exit 1
+              ;;
+          esac
+          case "$KEEPALIVE_EXPECTED_STATUS" in
+            ''|*[!0-9]*)
+              echo "KEEPALIVE_EXPECTED_STATUS must be numeric."
+              exit 1
+              ;;
+          esac
+
+      - name: Ping bot health endpoint
+        run: |
+          curl_args=(
+            --silent
+            --show-error
+            --location
+            --max-time 30
+            --retry 2
+            --retry-all-errors
+            --request "$KEEPALIVE_METHOD"
+            --output /tmp/keepalive-response.txt
+            --write-out '%{http_code}'
+          )
+          if [ -n "$KEEPALIVE_AUTH_HEADER" ]; then
+            curl_args+=(--header "$KEEPALIVE_AUTH_HEADER")
+          fi
+          status_code="$(curl "${curl_args[@]}" "$KEEPALIVE_URL")"
+          if [ "$status_code" != "$KEEPALIVE_EXPECTED_STATUS" ]; then
+            echo "Unexpected status: $status_code (expected $KEEPALIVE_EXPECTED_STATUS)"
+            cat /tmp/keepalive-response.txt
+            exit 1
+          fi
