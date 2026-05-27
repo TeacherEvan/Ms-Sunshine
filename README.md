@@ -81,6 +81,16 @@ Local run
 Docker run
 - docker compose up --build
 
+GitHub Actions keepalive
+- `.github/workflows/keepalive.yml` pings your deployed health endpoint every 10 minutes and can also be run manually.
+- Configure these GitHub repository variables before enabling it:
+  - `KEEPALIVE_URL`
+  - `KEEPALIVE_METHOD` (optional, defaults to `GET`; `HEAD` is also supported)
+  - `KEEPALIVE_EXPECTED_STATUS` (optional, defaults to `200`)
+- Optional GitHub repository secret:
+  - `KEEPALIVE_AUTH_HEADER` (example value: Authorization header string)
+- Point `KEEPALIVE_URL` at your public `/health` endpoint.
+
 Admin usage
 - send header: X-Admin-Key: your ADMIN_API_KEY
 - examples:
