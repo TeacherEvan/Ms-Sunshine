@@ -22,10 +22,13 @@ jobs:
       KEEPALIVE_AUTH_HEADER: ${{ secrets.KEEPALIVE_AUTH_HEADER }}
     steps:
       - name: Check keepalive configuration
+        id: config
         run: |
           if [ -z "$KEEPALIVE_URL" ]; then
-            echo "Repository variable KEEPALIVE_URL is required."
-            exit 1
+            # Not configured yet — skip quietly instead of failing every 10 min.
+            echo "KEEPALIVE_URL not set; skipping ping. Set the repository variable to enable."
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
           case "$KEEPALIVE_METHOD" in
             GET|HEAD)
@@ -41,8 +44,10 @@ jobs:
               exit 1
               ;;
           esac
+          echo "enabled=true" >> "$GITHUB_OUTPUT"
 
       - name: Ping bot health endpoint
+        if: steps.config.outputs.enabled == 'true'
         run: |
           curl_args=(
             --silent
