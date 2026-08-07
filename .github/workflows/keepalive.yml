@@ -13,7 +13,8 @@ concurrency:
 
 jobs:
   ping:
-    runs-on: ubuntu-latest
+    # Use explicit runner version for stability; ubuntu-latest can fluctuate.
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     env:
       KEEPALIVE_URL: ${{ vars.KEEPALIVE_URL }}
