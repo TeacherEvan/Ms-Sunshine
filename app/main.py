@@ -6,13 +6,13 @@ import hmac
 import json
 import os
 import sqlite3
-from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
+from collections.abc import AsyncIterator
 from urllib.parse import urlencode
 
 from dotenv import load_dotenv
@@ -26,6 +26,12 @@ load_dotenv(PROJECT_ROOT / ".env")
 GOOGLE_SCOPES = ("https://www.googleapis.com/auth/calendar.events",)
 MAX_BODY_BYTES_DEFAULT = 1_048_576
 MAX_EVENT_AGE_SECONDS_DEFAULT = 600
+
+
+class ConfigError(RuntimeError):
+    pass
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     settings = get_settings()
