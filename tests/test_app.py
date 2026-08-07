@@ -37,7 +37,7 @@ def load_app(monkeypatch: pytest.MonkeyPatch, extra_env: dict[str, str] | None =
     if extra_env:
         for key, value in extra_env.items():
             monkeypatch.setenv(key, value)
-    import app.main as main
+    from app import main
     main.get_settings.cache_clear()
     return importlib.reload(main)
 

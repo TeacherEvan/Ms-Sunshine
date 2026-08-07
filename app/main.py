@@ -11,7 +11,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, AsyncIterator
+from typing import Any
+from collections.abc import AsyncIterator
 from urllib.parse import urlencode
 
 from dotenv import load_dotenv
@@ -136,7 +137,7 @@ def resolve_sqlite_path(database_url: str) -> Path:
     prefix = "sqlite:///"
     if "://" in database_url and not database_url.startswith(prefix):
         raise ConfigError("Only sqlite:/// DATABASE_URL values are supported in this build")
-    raw_path = database_url[len(prefix) :] if database_url.startswith(prefix) else database_url
+    raw_path = database_url.removeprefix(prefix)
     path = Path(raw_path)
     if not path.is_absolute():
         path = (PROJECT_ROOT / path).resolve()
