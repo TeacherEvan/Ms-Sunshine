@@ -6,13 +6,13 @@ import hmac
 import json
 import os
 import sqlite3
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
-from collections.abc import AsyncIterator
 from urllib.parse import urlencode
 
 from dotenv import load_dotenv
@@ -149,7 +149,7 @@ def redact(value: str) -> str:
         return ""
     if len(value) <= 8:
         return "***"
-    return value[:4] + "…" + value[-4:]
+    return value[:4] + "..." + value[-4:]
 
 
 def redact_database_url(database_url: str) -> str:
@@ -344,6 +344,7 @@ def save_event(event: LineMessageEvent, settings: Settings) -> bool:
         return True
     except sqlite3.IntegrityError:
         return False
+
 
 @app.get("/health", include_in_schema=False)
 def health() -> dict[str, bool]:
