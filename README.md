@@ -7,9 +7,13 @@ Current capabilities
 - allows only one LINE user ID
 - optionally restricts to specific LINE group IDs
 - triggers only when configured phrases appear in text
-- stores accepted notes and placeholder tasks in SQLite
+- stores accepted notes and tasks in SQLite
+- exchanges the Google OAuth authorization code and persists refresh + access tokens
+- refreshes expired access tokens transparently before each Calendar call
+- creates a Google Calendar event when a LINE note is accepted
 - exposes admin-only endpoints with an API key
 - generates a Google OAuth consent URL for calendar setup
+- supports revoking the stored Google token via an admin endpoint
 - disables docs/OpenAPI by default
 
 Endpoints
@@ -18,11 +22,15 @@ Endpoints
 - GET /ready
   - readiness; returns 503 if required config or DB access is broken
 - POST /webhook/line
-  - LINE webhook endpoint
+  - LINE webhook endpoint (creates a Google Calendar event on accept when configured)
+- GET /auth/google/callback
+  - public Google OAuth callback (state-checked; exchanges code and persists tokens)
 - GET /admin/config
-  - admin-only redacted config/status
+  - admin-only redacted config/status (includes google connection state)
 - GET /admin/google/oauth-url
   - admin-only Google consent URL generator
+- DELETE /admin/google/token
+  - admin-only Google token revoke
 - GET /admin/notes
   - admin-only note listing
 
@@ -47,8 +55,8 @@ Optional environment variables
 
 Important constraints
 - This build supports sqlite:/// DATABASE_URL only.
-- Google Calendar token exchange, callback handling, and token persistence are not implemented yet.
-- The current task record is a placeholder derived from the accepted note text.
+- Tokens are stored in plaintext in the local SQLite file (single-owner admin service; encryption-at-rest is intentionally out of scope).
+- If no Google tokens are stored, the webhook still accepts notes and creates a `pending` task; sync is silently skipped.
 
 LINE setup
 1. Create a Messaging API channel in LINE Developers.

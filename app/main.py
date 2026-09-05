@@ -13,7 +13,9 @@ from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
+from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
+from urllib.request import Request as UrlRequest, urlopen
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, Header, HTTPException, Query, Request
@@ -319,6 +321,18 @@ def init_db(settings: Settings) -> None:
             )
             """
         )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS google_tokens (
+                kind TEXT PRIMARY KEY,
+                access_token TEXT NOT NULL,
+                refresh_token TEXT,
+                expires_at TEXT NOT NULL,
+                scopes TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
 
 
 def can_open_db(settings: Settings) -> bool:
@@ -365,6 +379,8 @@ def admin_config(x_admin_key: str | None = Header(default=None)) -> dict[str, An
     settings = get_settings()
     ensure_admin(x_admin_key, settings)
     errors = settings_errors(settings)
+    with connect_db(settings) as connection:
+        token_row = _load_token_row(connection)
     return {
         "ok": not errors,
         "errors": errors,
@@ -376,6 +392,11 @@ def admin_config(x_admin_key: str | None = Header(default=None)) -> dict[str, An
             "DATABASE_URL": redact_database_url(settings.database_url),
             "GOOGLE_CLIENT_ID": redact(settings.google_client_id),
             "GOOGLE_CALENDAR_ID": redact(settings.google_calendar_id),
+        },
+        "google": {
+            "connected": token_row is not None,
+            "scopes": list(token_row.scopes) if token_row else [],
+            "expires_at": token_row.expires_at.isoformat() if token_row else None,
         },
     }
 
@@ -427,6 +448,13 @@ async def line_webhook(request: Request, x_line_signature: str | None = Header(d
             continue
         if save_event(parsed, settings):
             accepted += 1
+            with connect_db(settings) as _sync_conn:
+                note_id = _sync_conn.execute(
+                    "SELECT id FROM notes WHERE source_event_id = ?",
+                    (parsed.event_id,),
+                ).fetchone()
+                if note_id is not None:
+                    sync_note_to_calendar(_sync_conn, note_id["id"])
         else:
             ignored += 1
     return {"accepted": accepted, "ignored": ignored}
@@ -445,3 +473,295 @@ def admin_notes(
             (limit,),
         ).fetchall()
     return {"items": [dict(row) for row in rows]}
+
+
+# ---------------------------------------------------------------------------
+# Google Calendar sync (added 2026-09-05)
+# ---------------------------------------------------------------------------
+
+GOOGLE_OAUTH_STATE = "sunshine-google-oauth"
+GOOGLE_TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token"
+GOOGLE_CALENDAR_EVENTS_ENDPOINT = "https://www.googleapis.com/calendar/v3/calendars/{calendar_id}/events"
+TOKEN_REFRESH_SKEW_SECONDS = 60
+
+
+class GoogleAPIError(RuntimeError):
+    """Raised when the Google HTTP API returns a non-2xx response."""
+
+
+@dataclass(frozen=True)
+class TokenSet:
+    access_token: str
+    refresh_token: str | None
+    expires_at: datetime
+    scopes: tuple[str, ...]
+
+    @property
+    def is_expired(self) -> bool:
+        now = datetime.now(timezone.utc)
+        return self.expires_at <= now + __import__("datetime").timedelta(seconds=TOKEN_REFRESH_SKEW_SECONDS)
+
+    def to_row(self) -> dict[str, str]:
+        return {
+            "access_token": self.access_token,
+            "refresh_token": self.refresh_token or "",
+            "expires_at": self.expires_at.isoformat(),
+            "scopes": " ".join(self.scopes),
+        }
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _parse_iso(value: str) -> datetime:
+    return datetime.fromisoformat(value)
+
+
+class GoogleCalendarClient:
+    """Thin wrapper around Google OAuth + Calendar REST APIs.
+
+    All HTTP I/O goes through `_request` so tests can subclass and override.
+    """
+
+    def __init__(self, settings, *, opener=urlopen) -> None:
+        self._settings = settings
+        self._opener = opener
+
+    def _request(self, url: str, *, data: dict[str, str] | None = None, headers: dict[str, str] | None = None) -> dict[str, Any]:
+        body: bytes | None = None
+        req_headers = {"Accept": "application/json"}
+        if headers:
+            req_headers.update(headers)
+        if data is not None:
+            body = urlencode(data).encode("utf-8")
+            req_headers["Content-Type"] = "application/x-www-form-urlencoded"
+        request = UrlRequest(url, data=body, headers=req_headers, method="POST" if data is not None else "GET")
+        try:
+            with self._opener(request, timeout=10) as response:  # noqa: S310 - intentional outbound
+                raw = response.read()
+        except HTTPError as exc:
+            raise GoogleAPIError(f"google api error: {exc.code}") from exc
+        except URLError as exc:
+            raise GoogleAPIError(f"google api unreachable: {exc.reason}") from exc
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise GoogleAPIError("google api returned non-json body") from exc
+
+    def exchange_code(self, code: str) -> TokenSet:
+        settings = self._settings
+        payload = self._request(
+            GOOGLE_TOKEN_ENDPOINT,
+            data={
+                "code": code,
+                "client_id": settings.google_client_id,
+                "client_secret": settings.google_client_secret,
+                "redirect_uri": settings.google_redirect_uri,
+                "grant_type": "authorization_code",
+            },
+        )
+        return self._tokens_from_payload(payload)
+
+    def refresh(self, refresh_token: str) -> TokenSet:
+        settings = self._settings
+        payload = self._request(
+            GOOGLE_TOKEN_ENDPOINT,
+            data={
+                "client_id": settings.google_client_id,
+                "client_secret": settings.google_client_secret,
+                "refresh_token": refresh_token,
+                "grant_type": "refresh_token",
+            },
+        )
+        return self._tokens_from_payload(payload, fallback_refresh=refresh_token)
+
+    def _tokens_from_payload(self, payload: dict[str, Any], *, fallback_refresh: str | None = None) -> TokenSet:
+        access = payload.get("access_token")
+        if not access:
+            raise GoogleAPIError("google token payload missing access_token")
+        expires_in = int(payload.get("expires_in", 3600))
+        expires_at = datetime.now(timezone.utc).replace(microsecond=0) + __import__("datetime").timedelta(seconds=expires_in)
+        refresh = payload.get("refresh_token") or fallback_refresh
+        scopes_raw = payload.get("scope", "")
+        scopes = tuple(scopes_raw.split()) if scopes_raw else GOOGLE_SCOPES
+        return TokenSet(
+            access_token=access,
+            refresh_token=refresh,
+            expires_at=expires_at,
+            scopes=scopes,
+        )
+
+    def create_event(
+        self,
+        token: TokenSet,
+        *,
+        summary: str,
+        start_iso: str,
+        end_iso: str,
+        timezone_name: str = "UTC",
+    ) -> str:
+        url = GOOGLE_CALENDAR_EVENTS_ENDPOINT.format(calendar_id=self._settings.google_calendar_id)
+        body = json.dumps(
+            {
+                "summary": summary,
+                "start": {"dateTime": start_iso, "timeZone": timezone_name},
+                "end": {"dateTime": end_iso, "timeZone": timezone_name},
+            }
+        ).encode("utf-8")
+        request = UrlRequest(
+            url,
+            data=body,
+            headers={
+                "Authorization": f"Bearer {token.access_token}",
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+            },
+            method="POST",
+        )
+        try:
+            with self._opener(request, timeout=10) as response:  # noqa: S310
+                raw = response.read()
+        except HTTPError as exc:
+            raise GoogleAPIError(f"google calendar error: {exc.code}") from exc
+        except URLError as exc:
+            raise GoogleAPIError(f"google calendar unreachable: {exc.reason}") from exc
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise GoogleAPIError("google calendar returned non-json body") from exc
+        event_id = payload.get("id")
+        if not event_id:
+            raise GoogleAPIError("google calendar response missing event id")
+        return str(event_id)
+
+
+# Module-level seam so tests can monkeypatch.
+def _build_default_client(settings) -> GoogleCalendarClient:
+    return GoogleCalendarClient(settings)
+
+
+def _load_token_row(connection: sqlite3.Connection) -> TokenSet | None:
+    row = connection.execute(
+        "SELECT access_token, refresh_token, expires_at, scopes FROM google_tokens WHERE kind = 'google'"
+    ).fetchone()
+    if not row:
+        return None
+    access, refresh, expires_at_raw, scopes_raw = row["access_token"], row["refresh_token"], row["expires_at"], row["scopes"]
+    return TokenSet(
+        access_token=access,
+        refresh_token=refresh or None,
+        expires_at=_parse_iso(expires_at_raw),
+        scopes=tuple(scopes_raw.split()) if scopes_raw else GOOGLE_SCOPES,
+    )
+
+
+def _save_token_row(connection: sqlite3.Connection, token: TokenSet) -> None:
+    connection.execute(
+        """
+        INSERT INTO google_tokens(kind, access_token, refresh_token, expires_at, scopes, updated_at)
+        VALUES('google', :access_token, :refresh_token, :expires_at, :scopes, :updated_at)
+        ON CONFLICT(kind) DO UPDATE SET
+            access_token = excluded.access_token,
+            refresh_token = excluded.refresh_token,
+            expires_at = excluded.expires_at,
+            scopes = excluded.scopes,
+            updated_at = excluded.updated_at
+        """,
+        {
+            "access_token": token.access_token,
+            "refresh_token": token.refresh_token or "",
+            "expires_at": token.expires_at.isoformat(),
+            "scopes": " ".join(token.scopes),
+            "updated_at": _now_iso(),
+        },
+    )
+
+
+def _delete_token_row(connection: sqlite3.Connection) -> int:
+    cursor = connection.execute("DELETE FROM google_tokens WHERE kind = 'google'")
+    return cursor.rowcount
+
+
+def sync_note_to_calendar(
+    connection: sqlite3.Connection,
+    note_id: int,
+    *,
+    client_factory=None,
+    settings_factory=get_settings,
+    logger=print,
+) -> str:
+    """Best-effort calendar sync for a saved note.
+
+    Returns the resulting task status ('synced' | 'sync_failed' | 'no_tokens').
+    Never raises — failures are logged and recorded on the task row.
+    """
+    settings = settings_factory()
+    if client_factory is None:
+        client_factory = globals()["_build_default_client"]
+    task_row = connection.execute(
+        "SELECT id, title FROM tasks WHERE note_id = ? ORDER BY id DESC LIMIT 1",
+        (note_id,),
+    ).fetchone()
+    if not task_row:
+        return "no_tokens"
+    task_id = task_row["id"]
+
+    token = _load_token_row(connection)
+    if token is None:
+        return "no_tokens"
+
+    try:
+        if token.is_expired and token.refresh_token:
+            refreshed = client_factory(settings).refresh(token.refresh_token)
+            token = refreshed
+            _save_token_row(connection, token)
+        event_id = client_factory(settings).create_event(
+            token,
+            summary=task_row["title"],
+            start_iso=datetime.now(timezone.utc).isoformat(),
+            end_iso=(datetime.now(timezone.utc) + __import__("datetime").timedelta(minutes=30)).isoformat(),
+        )
+    except GoogleAPIError as exc:
+        logger(f"calendar sync failed for note {note_id}: {exc}")
+        connection.execute(
+            "UPDATE tasks SET status = 'sync_failed' WHERE id = ?",
+            (task_id,),
+        )
+        connection.commit()
+        return "sync_failed"
+
+    connection.execute(
+        "UPDATE tasks SET calendar_event_id = ?, status = 'synced' WHERE id = ?",
+        (event_id, task_id),
+    )
+    connection.commit()
+    return "synced"
+
+
+@app.get("/auth/google/callback", include_in_schema=False)
+def auth_google_callback(
+    code: str | None = None,
+    state: str | None = None,
+) -> dict[str, Any]:
+    if not code or state != GOOGLE_OAUTH_STATE:
+        raise HTTPException(status_code=400, detail="invalid oauth callback")
+    settings = get_settings()
+    if not settings.google_client_id or not settings.google_client_secret or not settings.google_redirect_uri:
+        raise HTTPException(status_code=503, detail="google oauth is not configured")
+    client = _build_default_client(settings)
+    token = client.exchange_code(code)
+    with connect_db(settings) as connection:
+        _save_token_row(connection, token)
+        connection.commit()
+    return {"ok": True, "expires_at": token.expires_at.isoformat()}
+
+
+@app.delete("/admin/google/token", include_in_schema=False)
+def admin_google_token_delete(x_admin_key: str | None = Header(default=None)) -> dict[str, bool]:
+    settings = get_settings()
+    ensure_admin(x_admin_key, settings)
+    with connect_db(settings) as connection:
+        removed = _delete_token_row(connection)
+        connection.commit()
+    return {"ok": True, "removed": removed > 0}

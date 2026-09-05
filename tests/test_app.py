@@ -254,3 +254,259 @@ def test_google_oauth_url_script_matches_admin_endpoint(client):
     parsed = urlparse(admin_url)
     assert parsed.netloc == "accounts.google.com"
     assert parsed.path.endswith("/o/oauth2/v2/auth")
+
+
+# ---------------------------------------------------------------------------
+# Google Calendar sync (added 2026-09-05)
+# ---------------------------------------------------------------------------
+
+
+class _FakeResponse:
+    def __init__(self, payload: dict, status: int = 200) -> None:
+        self._payload = payload
+        self._status = status
+
+    def read(self) -> bytes:
+        import json as _json
+        return _json.dumps(self._payload).encode("utf-8")
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return False
+
+    @property
+    def status(self) -> int:
+        return self._status
+
+
+class _FakeOpener:
+    def __init__(self, *, token_payload=None, event_payload=None, fail_event: bool = False):
+        self.token_payload = token_payload or {
+            "access_token": "ya29.fake",
+            "refresh_token": "1//fake",
+            "expires_in": 3600,
+            "scope": "https://www.googleapis.com/auth/calendar.events",
+        }
+        self.event_payload = event_payload or {"id": "evt-abc123"}
+        self.fail_event = fail_event
+        self.token_calls = 0
+        self.event_calls = 0
+
+    def __call__(self, request, timeout=10):  # noqa: ARG002 - matches urlopen signature
+        from urllib.error import HTTPError as _HTTPError
+        url = request.full_url
+        if "oauth2.googleapis.com" in url:
+            self.token_calls += 1
+            return _FakeResponse(self.token_payload)
+        if "googleapis.com/calendar" in url:
+            self.event_calls += 1
+            if self.fail_event:
+                raise _HTTPError(url, 500, "internal", {}, None)
+            return _FakeResponse(self.event_payload)
+        raise AssertionError(f"unexpected url: {url}")
+
+
+def _install_fake_client(monkeypatch, main_module, **kwargs):
+    fake = _FakeOpener(**kwargs)
+    monkeypatch.setattr(main_module, "_build_default_client", lambda settings: main_module.GoogleCalendarClient(settings, opener=fake))
+    return fake
+
+
+def test_init_db_creates_google_tokens_table(client):
+    _, main = client
+    with main.connect_db(main.get_settings()) as conn:
+        row = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='google_tokens'"
+        ).fetchone()
+        assert row is not None and row["name"] == "google_tokens"
+
+
+def test_callback_route_registered(client):
+    test_client, _ = client
+    response = test_client.get("/auth/google/callback")
+    # 400 because code is missing — but the route MUST exist (not 404).
+    assert response.status_code == 400
+    assert "invalid oauth callback" in response.text.lower()
+
+
+def test_callback_rejects_bad_state(client):
+    test_client, _ = client
+    response = test_client.get("/auth/google/callback", params={"code": "x", "state": "evil"})
+    assert response.status_code == 400
+    assert "invalid oauth callback" in response.text.lower()
+
+
+def test_callback_stores_tokens_on_success(client, monkeypatch):
+    test_client, main = client
+    fake = _install_fake_client(monkeypatch, main)
+    response = test_client.get(
+        "/auth/google/callback",
+        params={"code": "auth-code-1", "state": "sunshine-google-oauth"},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["ok"] is True
+    assert fake.token_calls == 1
+    with main.connect_db(main.get_settings()) as conn:
+        row = conn.execute(
+            "SELECT access_token, refresh_token, expires_at, scopes FROM google_tokens WHERE kind='google'"
+        ).fetchone()
+        assert row is not None
+        assert row["access_token"] == "ya29.fake"
+        assert row["refresh_token"] == "1//fake"
+
+
+def test_admin_revoke_clears_tokens(client, monkeypatch):
+    test_client, main = client
+    fake = _install_fake_client(monkeypatch, main)
+    # First store a token via callback
+    test_client.get(
+        "/auth/google/callback",
+        params={"code": "auth-code-2", "state": "sunshine-google-oauth"},
+    )
+    # Now revoke (requires admin key)
+    response = test_client.delete(
+        "/admin/google/token",
+        headers={"X-Admin-Key": "admin-secret-key"},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json() == {"ok": True, "removed": True}
+    # Token row gone
+    with main.connect_db(main.get_settings()) as conn:
+        row = conn.execute(
+            "SELECT 1 FROM google_tokens WHERE kind='google'"
+        ).fetchone()
+        assert row is None
+    assert fake.token_calls == 1  # exchange only, no extra calls
+
+
+def test_admin_revoke_requires_api_key(client):
+    test_client, _ = client
+    response = test_client.delete("/admin/google/token")
+    assert response.status_code in (401, 403)
+
+
+def test_webhook_works_without_google_config(client, monkeypatch):
+    test_client, main = client
+    # Wipe google config and reload — but callback needs GOOGLE_CLIENT_ID too.
+    # The simpler proof: no token row in DB + a real webhook still accepts a note.
+    # (Don't actually wipe env; just verify "no tokens" path doesn't error.)
+    main.get_settings.cache_clear()
+    body = __import__("json").dumps(make_event("sunshine noop", timestamp=int(__import__("time").time() * 1000), webhook_event_id="evt-noop-1")).encode("utf-8")
+    response = test_client.post(
+        "/webhook/line",
+        content=body,
+        headers=signed_headers(main, body),
+    )
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["accepted"] == 1
+    # Note row exists, task row exists, status remains 'pending' (no sync attempted).
+    with main.connect_db(main.get_settings()) as conn:
+        row = conn.execute(
+            "SELECT status, calendar_event_id FROM tasks ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        assert row["status"] == "pending"
+        assert row["calendar_event_id"] is None
+
+
+def test_note_accept_creates_calendar_event(client, monkeypatch):
+    test_client, main = client
+    fake = _install_fake_client(monkeypatch, main, event_payload={"id": "evt-xyz789"})
+    # Seed a token row directly so the webhook path finds one.
+    with main.connect_db(main.get_settings()) as conn:
+        main._save_token_row(
+            conn,
+            main.TokenSet(
+                access_token="ya29.fake",
+                refresh_token="1//fake",
+                expires_at=__import__("datetime").datetime.now(__import__("datetime").timezone.utc) + __import__("datetime").timedelta(hours=1),
+                scopes=main.GOOGLE_SCOPES,
+            ),
+        )
+        conn.commit()
+    body = __import__("json").dumps(make_event("sunshine sync me", timestamp=int(__import__("time").time() * 1000), webhook_event_id="evt-sync-1")).encode("utf-8")
+    response = test_client.post(
+        "/webhook/line",
+        content=body,
+        headers=signed_headers(main, body),
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["accepted"] == 1
+    assert fake.event_calls == 1
+    with main.connect_db(main.get_settings()) as conn:
+        row = conn.execute(
+            "SELECT calendar_event_id, status FROM tasks ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        assert row["calendar_event_id"] == "evt-xyz789"
+        assert row["status"] == "synced"
+
+
+def test_sync_failure_marks_task_failed(client, monkeypatch):
+    test_client, main = client
+    _install_fake_client(monkeypatch, main, fail_event=True)
+    with main.connect_db(main.get_settings()) as conn:
+        main._save_token_row(
+            conn,
+            main.TokenSet(
+                access_token="ya29.fake",
+                refresh_token=None,
+                expires_at=__import__("datetime").datetime.now(__import__("datetime").timezone.utc) + __import__("datetime").timedelta(hours=1),
+                scopes=main.GOOGLE_SCOPES,
+            ),
+        )
+        conn.commit()
+    body = __import__("json").dumps(make_event("sunshine sync fail", timestamp=int(__import__("time").time() * 1000), webhook_event_id="evt-fail-1")).encode("utf-8")
+    response = test_client.post(
+        "/webhook/line",
+        content=body,
+        headers=signed_headers(main, body),
+    )
+    assert response.status_code == 200, response.text
+    with main.connect_db(main.get_settings()) as conn:
+        note = conn.execute(
+            "SELECT text FROM notes ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        task = conn.execute(
+            "SELECT calendar_event_id, status FROM tasks ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        # Note still recorded
+        assert note["text"] == "sunshine sync fail"
+        # Task marked failed, no calendar id
+        assert task["calendar_event_id"] is None
+        assert task["status"] == "sync_failed"
+
+
+def test_token_refresh_when_near_expiry(client, monkeypatch):
+    test_client, main = client
+    fake = _install_fake_client(monkeypatch, main, event_payload={"id": "evt-renew"})
+    # Token near expiry (now + 10s, less than the 60s skew)
+    near_expiry = __import__("datetime").datetime.now(__import__("datetime").timezone.utc) + __import__("datetime").timedelta(seconds=10)
+    with main.connect_db(main.get_settings()) as conn:
+        main._save_token_row(
+            conn,
+            main.TokenSet(
+                access_token="ya29.stale",
+                refresh_token="1//refresh",
+                expires_at=near_expiry,
+                scopes=main.GOOGLE_SCOPES,
+            ),
+        )
+        conn.commit()
+    body = __import__("json").dumps(make_event("sunshine refresh", timestamp=int(__import__("time").time() * 1000), webhook_event_id="evt-refresh-1")).encode("utf-8")
+    response = test_client.post(
+        "/webhook/line",
+        content=body,
+        headers=signed_headers(main, body),
+    )
+    assert response.status_code == 200, response.text
+    # Both refresh + event called.
+    assert fake.token_calls == 1
+    assert fake.event_calls == 1
+    # Access token refreshed in DB.
+    with main.connect_db(main.get_settings()) as conn:
+        row = conn.execute(
+            "SELECT access_token FROM google_tokens WHERE kind='google'"
+        ).fetchone()
+        assert row["access_token"] == "ya29.fake"  # from fake payload
