@@ -294,7 +294,7 @@ class _FakeOpener:
         self.token_calls = 0
         self.event_calls = 0
 
-    def __call__(self, request, timeout=10):  # noqa: ARG002 - matches urlopen signature
+    def __call__(self, request, timeout=10):
         from urllib.error import HTTPError as _HTTPError
         url = request.full_url
         if "oauth2.googleapis.com" in url:

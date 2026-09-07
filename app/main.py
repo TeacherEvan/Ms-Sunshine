@@ -15,7 +15,8 @@ from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
-from urllib.request import Request as UrlRequest, urlopen
+from urllib.request import Request as UrlRequest
+from urllib.request import urlopen
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, Header, HTTPException, Query, Request
@@ -538,7 +539,7 @@ class GoogleCalendarClient:
             req_headers["Content-Type"] = "application/x-www-form-urlencoded"
         request = UrlRequest(url, data=body, headers=req_headers, method="POST" if data is not None else "GET")
         try:
-            with self._opener(request, timeout=10) as response:  # noqa: S310 - intentional outbound
+            with self._opener(request, timeout=10) as response:
                 raw = response.read()
         except HTTPError as exc:
             raise GoogleAPIError(f"google api error: {exc.code}") from exc
@@ -620,7 +621,7 @@ class GoogleCalendarClient:
             method="POST",
         )
         try:
-            with self._opener(request, timeout=10) as response:  # noqa: S310
+            with self._opener(request, timeout=10) as response:
                 raw = response.read()
         except HTTPError as exc:
             raise GoogleAPIError(f"google calendar error: {exc.code}") from exc
