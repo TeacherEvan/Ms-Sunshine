@@ -20,6 +20,26 @@ from urllib.request import urlopen
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, Header, HTTPException, Query, Request
+from app.constants import (
+    DEFAULT_TRIGGER_PHRASES,
+    ENV_ADMIN_API_KEY,
+    ENV_ALLOWED_HOSTS,
+    ENV_CHANNEL_ID,
+    ENV_CHANNEL_SECRET,
+    ENV_DATABASE_URL,
+    ENV_ENABLE_API_DOCS,
+    ENV_GOOGLE_CALENDAR_ID,
+    ENV_GOOGLE_CLIENT_ID,
+    ENV_GOOGLE_CLIENT_SECRET,
+    ENV_GOOGLE_REDIRECT_URI,
+    ENV_LINE_ALLOWED_GROUP_IDS,
+    ENV_LINE_ALLOWED_USER_ID,
+    ENV_LINE_TRIGGER_PHRASES,
+    ENV_MAX_EVENT_AGE_SECONDS,
+    ENV_MAX_WEBHOOK_BODY_BYTES,
+    GOOGLE_OAUTH_NOT_CONFIGURED,
+    GOOGLE_OAUTH_STATE,
+)
 from fastapi.responses import JSONResponse
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
@@ -70,7 +90,7 @@ def parse_positive_int(raw: str | None, default: int) -> int:
 
 
 def build_app() -> FastAPI:
-    docs_enabled = env_flag("ENABLE_API_DOCS", False)
+    docs_enabled = env_flag(ENV_ENABLE_API_DOCS, False)
     app_instance = FastAPI(
         title="Ms Sunshine",
         docs_url="/docs" if docs_enabled else None,
@@ -78,7 +98,7 @@ def build_app() -> FastAPI:
         openapi_url="/openapi.json" if docs_enabled else None,
         lifespan=lifespan,
     )
-    allowed_hosts = parse_csv(os.getenv("ALLOWED_HOSTS", ""))
+    allowed_hosts = parse_csv(os.getenv(ENV_ALLOWED_HOSTS, ""))
     if allowed_hosts:
         app_instance.add_middleware(TrustedHostMiddleware, allowed_hosts=allowed_hosts)
     return app_instance
@@ -116,23 +136,23 @@ class LineMessageEvent:
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
-    database_url = os.getenv("DATABASE_URL", "sqlite:///./data/sunshine.db").strip()
+    database_url = os.getenv(ENV_DATABASE_URL, "sqlite:///./data/sunshine.db").strip()
     db_path = resolve_sqlite_path(database_url)
     return Settings(
-        channel_id=os.getenv("CHANNEL_ID", "").strip(),
-        channel_secret=os.getenv("CHANNEL_SECRET", "").strip(),
-        allowed_user_id=os.getenv("LINE_ALLOWED_USER_ID", "").strip(),
-        allowed_group_ids=tuple(parse_csv(os.getenv("LINE_ALLOWED_GROUP_IDS", ""))),
-        trigger_phrases=tuple(parse_csv(os.getenv("LINE_TRIGGER_PHRASES", "sunshine,Ms Sunshine"), lower=True)),
+        channel_id=os.getenv(ENV_CHANNEL_ID, "").strip(),
+        channel_secret=os.getenv(ENV_CHANNEL_SECRET, "").strip(),
+        allowed_user_id=os.getenv(ENV_LINE_ALLOWED_USER_ID, "").strip(),
+        allowed_group_ids=tuple(parse_csv(os.getenv(ENV_LINE_ALLOWED_GROUP_IDS, ""))),
+        trigger_phrases=tuple(parse_csv(os.getenv(ENV_LINE_TRIGGER_PHRASES, DEFAULT_TRIGGER_PHRASES), lower=True)),
         database_url=database_url,
         db_path=db_path,
-        admin_api_key=os.getenv("ADMIN_API_KEY", "").strip(),
-        google_client_id=os.getenv("GOOGLE_CLIENT_ID", "").strip(),
-        google_client_secret=os.getenv("GOOGLE_CLIENT_SECRET", "").strip(),
-        google_redirect_uri=os.getenv("GOOGLE_REDIRECT_URI", "").strip(),
-        google_calendar_id=os.getenv("GOOGLE_CALENDAR_ID", "").strip(),
-        max_body_bytes=parse_positive_int(os.getenv("MAX_WEBHOOK_BODY_BYTES"), MAX_BODY_BYTES_DEFAULT),
-        max_event_age_seconds=parse_positive_int(os.getenv("MAX_EVENT_AGE_SECONDS"), MAX_EVENT_AGE_SECONDS_DEFAULT),
+        admin_api_key=os.getenv(ENV_ADMIN_API_KEY, "").strip(),
+        google_client_id=os.getenv(ENV_GOOGLE_CLIENT_ID, "").strip(),
+        google_client_secret=os.getenv(ENV_GOOGLE_CLIENT_SECRET, "").strip(),
+        google_redirect_uri=os.getenv(ENV_GOOGLE_REDIRECT_URI, "").strip(),
+        google_calendar_id=os.getenv(ENV_GOOGLE_CALENDAR_ID, "").strip(),
+        max_body_bytes=parse_positive_int(os.getenv(ENV_MAX_WEBHOOK_BODY_BYTES), MAX_BODY_BYTES_DEFAULT),
+        max_event_age_seconds=parse_positive_int(os.getenv(ENV_MAX_EVENT_AGE_SECONDS), MAX_EVENT_AGE_SECONDS_DEFAULT),
     )
 
 
@@ -170,23 +190,23 @@ def redact_database_url(database_url: str) -> str:
 def settings_errors(settings: Settings) -> list[str]:
     errors: list[str] = []
     if not settings.channel_id:
-        errors.append("CHANNEL_ID is required")
+        errors.append(f"{ENV_CHANNEL_ID} is required")
     if not settings.channel_secret:
-        errors.append("CHANNEL_SECRET is required")
+        errors.append(f"{ENV_CHANNEL_SECRET} is required")
     if not settings.allowed_user_id:
-        errors.append("LINE_ALLOWED_USER_ID is required")
+        errors.append(f"{ENV_LINE_ALLOWED_USER_ID} is required")
     if not settings.trigger_phrases:
-        errors.append("LINE_TRIGGER_PHRASES is required")
+        errors.append(f"{ENV_LINE_TRIGGER_PHRASES} is required")
     if not settings.admin_api_key:
-        errors.append("ADMIN_API_KEY is required for admin routes")
+        errors.append(f"{ENV_ADMIN_API_KEY} is required for admin routes")
     if not settings.google_client_id:
-        errors.append("GOOGLE_CLIENT_ID is required")
+        errors.append(f"{ENV_GOOGLE_CLIENT_ID} is required")
     if not settings.google_client_secret:
-        errors.append("GOOGLE_CLIENT_SECRET is required")
+        errors.append(f"{ENV_GOOGLE_CLIENT_SECRET} is required")
     if not settings.google_redirect_uri:
-        errors.append("GOOGLE_REDIRECT_URI is required")
+        errors.append(f"{ENV_GOOGLE_REDIRECT_URI} is required")
     if not settings.google_calendar_id:
-        errors.append("GOOGLE_CALENDAR_ID is required")
+        errors.append(f"{ENV_GOOGLE_CALENDAR_ID} is required")
     return errors
 
 
@@ -386,13 +406,13 @@ def admin_config(x_admin_key: str | None = Header(default=None)) -> dict[str, An
         "ok": not errors,
         "errors": errors,
         "redacted": {
-            "CHANNEL_ID": redact(settings.channel_id),
-            "LINE_ALLOWED_USER_ID": redact(settings.allowed_user_id),
-            "LINE_ALLOWED_GROUP_IDS": len(settings.allowed_group_ids),
-            "LINE_TRIGGER_PHRASES": list(settings.trigger_phrases),
-            "DATABASE_URL": redact_database_url(settings.database_url),
-            "GOOGLE_CLIENT_ID": redact(settings.google_client_id),
-            "GOOGLE_CALENDAR_ID": redact(settings.google_calendar_id),
+            f"{ENV_CHANNEL_ID}": redact(settings.channel_id),
+            f"{ENV_LINE_ALLOWED_USER_ID}": redact(settings.allowed_user_id),
+            f"{ENV_LINE_ALLOWED_GROUP_IDS}": len(settings.allowed_group_ids),
+            f"{ENV_LINE_TRIGGER_PHRASES}": list(settings.trigger_phrases),
+            f"{ENV_DATABASE_URL}": redact_database_url(settings.database_url),
+            f"{ENV_GOOGLE_CLIENT_ID}": redact(settings.google_client_id),
+            f"{ENV_GOOGLE_CALENDAR_ID}": redact(settings.google_calendar_id),
         },
         "google": {
             "connected": token_row is not None,
@@ -405,12 +425,12 @@ def admin_config(x_admin_key: str | None = Header(default=None)) -> dict[str, An
 @app.get("/admin/google/oauth-url", include_in_schema=False)
 def admin_google_oauth_url(
     x_admin_key: str | None = Header(default=None),
-    state: str = Query(default="sunshine-google-oauth"),
+    state: str = Query(default=GOOGLE_OAUTH_STATE),
 ) -> dict[str, str]:
     settings = get_settings()
     ensure_admin(x_admin_key, settings)
     if not settings.google_client_id or not settings.google_redirect_uri:
-        raise HTTPException(status_code=503, detail="google oauth is not configured")
+        raise HTTPException(status_code=503, detail=GOOGLE_OAUTH_NOT_CONFIGURED)
     query = urlencode(
         {
             "client_id": settings.google_client_id,
@@ -480,7 +500,7 @@ def admin_notes(
 # Google Calendar sync (added 2026-09-05)
 # ---------------------------------------------------------------------------
 
-GOOGLE_OAUTH_STATE = "sunshine-google-oauth"
+GOOGLE_OAUTH_STATE = GOOGLE_OAUTH_STATE
 GOOGLE_TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token"
 GOOGLE_CALENDAR_EVENTS_ENDPOINT = "https://www.googleapis.com/calendar/v3/calendars/{calendar_id}/events"
 TOKEN_REFRESH_SKEW_SECONDS = 60
@@ -749,7 +769,7 @@ def auth_google_callback(
         raise HTTPException(status_code=400, detail="invalid oauth callback")
     settings = get_settings()
     if not settings.google_client_id or not settings.google_client_secret or not settings.google_redirect_uri:
-        raise HTTPException(status_code=503, detail="google oauth is not configured")
+        raise HTTPException(status_code=503, detail=GOOGLE_OAUTH_NOT_CONFIGURED)
     client = _build_default_client(settings)
     token = client.exchange_code(code)
     with connect_db(settings) as connection:
