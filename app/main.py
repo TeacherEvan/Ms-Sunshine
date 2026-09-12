@@ -20,6 +20,9 @@ from urllib.request import urlopen
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, Header, HTTPException, Query, Request
+from fastapi.responses import JSONResponse
+from starlette.middleware.trustedhost import TrustedHostMiddleware
+
 from app.constants import (
     DEFAULT_TRIGGER_PHRASES,
     ENV_ADMIN_API_KEY,
@@ -40,8 +43,6 @@ from app.constants import (
     GOOGLE_OAUTH_NOT_CONFIGURED,
     GOOGLE_OAUTH_STATE,
 )
-from fastapi.responses import JSONResponse
-from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(PROJECT_ROOT / ".env")
@@ -500,7 +501,6 @@ def admin_notes(
 # Google Calendar sync (added 2026-09-05)
 # ---------------------------------------------------------------------------
 
-GOOGLE_OAUTH_STATE = GOOGLE_OAUTH_STATE
 GOOGLE_TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token"
 GOOGLE_CALENDAR_EVENTS_ENDPOINT = "https://www.googleapis.com/calendar/v3/calendars/{calendar_id}/events"
 TOKEN_REFRESH_SKEW_SECONDS = 60
