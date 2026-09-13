@@ -215,3 +215,185 @@ def test_health_returns_dict():
     assert isinstance(result, dict)
     assert "ok" in result
     assert result["ok"] is True
+
+
+# --- parse_positive_int -----------------------------------------------------
+
+def test_parse_positive_int_none_returns_default():
+    assert main.parse_positive_int(None, 42) == 42
+
+
+def test_parse_positive_int_empty_returns_default():
+    assert main.parse_positive_int("", 7) == 7
+
+
+def test_parse_positive_int_non_numeric_returns_default():
+    assert main.parse_positive_int("abc", 99) == 99
+
+
+def test_parse_positive_int_zero_returns_default():
+    assert main.parse_positive_int("0", 5) == 5
+
+
+def test_parse_positive_int_negative_returns_default():
+    assert main.parse_positive_int("-3", 5) == 5
+
+
+def test_parse_positive_int_valid_positive():
+    assert main.parse_positive_int("2048", 1) == 2048
+
+
+# --- env_flag ---------------------------------------------------------------
+
+def test_env_flag_unset_returns_default(monkeypatch):
+    monkeypatch.delenv("MS_SUNSHINE_TEST_FLAG", raising=False)
+    assert main.env_flag("MS_SUNSHINE_TEST_FLAG") is False
+    assert main.env_flag("MS_SUNSHINE_TEST_FLAG", True) is True
+
+
+@pytest.mark.parametrize("raw", ["1", "true", "TRUE", "True", "yes", "on", "YES"])
+def test_env_flag_truthy_values(monkeypatch, raw):
+    monkeypatch.setenv("MS_SUNSHINE_TEST_FLAG", raw)
+    assert main.env_flag("MS_SUNSHINE_TEST_FLAG") is True
+
+
+@pytest.mark.parametrize("raw", ["0", "false", "no", "off", "maybe", ""])
+def test_env_flag_falsy_values(monkeypatch, raw):
+    monkeypatch.setenv("MS_SUNSHINE_TEST_FLAG", raw)
+    assert main.env_flag("MS_SUNSHINE_TEST_FLAG") is False
+
+
+def test_env_flag_whitespace_tolerant(monkeypatch):
+    monkeypatch.setenv("MS_SUNSHINE_TEST_FLAG", "  true  ")
+    assert main.env_flag("MS_SUNSHINE_TEST_FLAG") is True
+
+
+# --- resolve_sqlite_path ----------------------------------------------------
+
+def test_resolve_sqlite_path_relative_anchors_to_project_root():
+    # resolve_sqlite_path resolves relative paths against PROJECT_ROOT, not cwd.
+    path = main.resolve_sqlite_path("sqlite:///./data/sunshine.db")
+    assert path == (main.PROJECT_ROOT / "data" / "sunshine.db").resolve()
+    assert path.is_absolute()
+
+
+def test_resolve_sqlite_path_absolute(tmp_path):
+    target = tmp_path / "abs.db"
+    path = main.resolve_sqlite_path(f"sqlite:///{target}")
+    assert path == target
+
+
+def test_resolve_sqlite_path_non_sqlite_raises():
+    from app.main import ConfigError
+    with pytest.raises(ConfigError):
+        main.resolve_sqlite_path("postgres://localhost/db")
+
+
+# --- TokenSet round-trip ----------------------------------------------------
+
+def _make_connection():
+    import sqlite3
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """CREATE TABLE google_tokens (
+            kind TEXT PRIMARY KEY,
+            access_token TEXT NOT NULL,
+            refresh_token TEXT,
+            expires_at TEXT NOT NULL,
+            scopes TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )"""
+    )
+    return conn
+
+
+def _make_token_set(expires_at=None):
+    from datetime import datetime, timedelta, timezone
+    if expires_at is None:
+        expires_at = datetime.now(timezone.utc) + timedelta(hours=1)
+    return main.TokenSet(
+        access_token="ya29.roundtrip",
+        refresh_token="1//rt",
+        expires_at=expires_at,
+        scopes=main.GOOGLE_SCOPES,
+    )
+
+
+def test_token_set_to_row_serialises_all_fields():
+    token = _make_token_set()
+    row = token.to_row()
+    assert row["access_token"] == "ya29.roundtrip"
+    assert row["refresh_token"] == "1//rt"
+    assert row["scopes"] == " ".join(main.GOOGLE_SCOPES)
+
+
+def test_token_set_round_trip_via_load_token_row():
+    conn = _make_connection()
+    token = _make_token_set()
+    main._save_token_row(conn, token)
+    loaded = main._load_token_row(conn)
+    assert loaded is not None
+    assert loaded.access_token == token.access_token
+    assert loaded.refresh_token == token.refresh_token
+    assert loaded.scopes == token.scopes
+    assert loaded.expires_at == token.expires_at
+
+
+def test_token_set_load_token_row_none_when_empty():
+    conn = _make_connection()
+    assert main._load_token_row(conn) is None
+
+
+def test_token_set_is_expired_future():
+    from datetime import datetime, timedelta, timezone
+    token = main.TokenSet(
+        access_token="a",
+        refresh_token=None,
+        expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
+        scopes=main.GOOGLE_SCOPES,
+    )
+    assert token.is_expired is False
+
+
+def test_token_set_is_expired_past():
+    from datetime import datetime, timedelta, timezone
+    token = main.TokenSet(
+        access_token="a",
+        refresh_token=None,
+        expires_at=datetime.now(timezone.utc) - timedelta(hours=1),
+        scopes=main.GOOGLE_SCOPES,
+    )
+    assert token.is_expired is True
+
+
+# --- save_event / can_open_db -----------------------------------------------
+
+class _SettingsStub:
+    def __init__(self, db_path):
+        self.db_path = db_path
+
+
+def test_save_event_insert_and_dedup(tmp_path):
+    db_path = tmp_path / "dedup.db"
+    settings = _SettingsStub(db_path)
+    main.init_db(settings)
+    event = main.LineMessageEvent(
+        event_id="evt-dedup-1",
+        user_id="U1",
+        group_id="C1",
+        text="sunshine",
+        received_at="2026-09-14T00:00:00+00:00",
+    )
+    assert main.save_event(event, settings) is True
+    # Duplicate source_event_id -> UNIQUE constraint -> False
+    assert main.save_event(event, settings) is False
+    with main.connect_db(settings) as conn:
+        count = conn.execute("SELECT COUNT(*) FROM notes").fetchone()[0]
+    assert count == 1
+
+
+def test_can_open_db_true_for_writable_path(tmp_path):
+    settings = _SettingsStub(tmp_path / "open.db")
+    main.init_db(settings)
+    assert main.can_open_db(settings) is True

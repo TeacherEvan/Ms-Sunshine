@@ -23,7 +23,7 @@ def redact(value: str) -> str:
         return ''
     if len(value) <= 8:
         return '***'
-    return value[:4] + '…' + value[-4:]
+    return value[:4] + '...' + value[-4:]
 
 
 def redact_database_url(value: str) -> str:

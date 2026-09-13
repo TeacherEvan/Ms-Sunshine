@@ -310,7 +310,7 @@ class _FakeOpener:
 
 def _install_fake_client(monkeypatch, main_module, **kwargs):
     fake = _FakeOpener(**kwargs)
-    monkeypatch.setattr(main_module, "_build_default_client", lambda settings: main_module.GoogleCalendarClient(settings, opener=fake))
+    monkeypatch.setattr(main_module, "_default_client_factory", lambda settings: main_module.GoogleCalendarClient(settings, opener=fake))
     return fake
 
 

@@ -9,7 +9,7 @@ import sqlite3
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -520,7 +520,7 @@ class TokenSet:
     @property
     def is_expired(self) -> bool:
         now = datetime.now(timezone.utc)
-        return self.expires_at <= now + __import__("datetime").timedelta(seconds=TOKEN_REFRESH_SKEW_SECONDS)
+        return self.expires_at <= now + timedelta(seconds=TOKEN_REFRESH_SKEW_SECONDS)
 
     def to_row(self) -> dict[str, str]:
         return {
@@ -602,7 +602,7 @@ class GoogleCalendarClient:
         if not access:
             raise GoogleAPIError("google token payload missing access_token")
         expires_in = int(payload.get("expires_in", 3600))
-        expires_at = datetime.now(timezone.utc).replace(microsecond=0) + __import__("datetime").timedelta(seconds=expires_in)
+        expires_at = datetime.now(timezone.utc).replace(microsecond=0) + timedelta(seconds=expires_in)
         refresh = payload.get("refresh_token") or fallback_refresh
         scopes_raw = payload.get("scope", "")
         scopes = tuple(scopes_raw.split()) if scopes_raw else GOOGLE_SCOPES
@@ -658,7 +658,7 @@ class GoogleCalendarClient:
 
 
 # Module-level seam so tests can monkeypatch.
-def _build_default_client(settings) -> GoogleCalendarClient:
+def _default_client_factory(settings) -> GoogleCalendarClient:
     return GoogleCalendarClient(settings)
 
 
@@ -719,7 +719,7 @@ def sync_note_to_calendar(
     """
     settings = settings_factory()
     if client_factory is None:
-        client_factory = globals()["_build_default_client"]
+        client_factory = _default_client_factory
     task_row = connection.execute(
         "SELECT id, title FROM tasks WHERE note_id = ? ORDER BY id DESC LIMIT 1",
         (note_id,),
@@ -741,7 +741,7 @@ def sync_note_to_calendar(
             token,
             summary=task_row["title"],
             start_iso=datetime.now(timezone.utc).isoformat(),
-            end_iso=(datetime.now(timezone.utc) + __import__("datetime").timedelta(minutes=30)).isoformat(),
+            end_iso=(datetime.now(timezone.utc) + timedelta(minutes=30)).isoformat(),
         )
     except GoogleAPIError as exc:
         logger(f"calendar sync failed for note {note_id}: {exc}")
@@ -770,7 +770,7 @@ def auth_google_callback(
     settings = get_settings()
     if not settings.google_client_id or not settings.google_client_secret or not settings.google_redirect_uri:
         raise HTTPException(status_code=503, detail=GOOGLE_OAUTH_NOT_CONFIGURED)
-    client = _build_default_client(settings)
+    client = _default_client_factory(settings)
     token = client.exchange_code(code)
     with connect_db(settings) as connection:
         _save_token_row(connection, token)

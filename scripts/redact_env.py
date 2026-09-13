@@ -22,7 +22,7 @@ def redact(value: str) -> str:
         return ""
     if len(value) <= 8:
         return "***"
-    return value[:4] + "…" + value[-4:]
+    return value[:4] + "..." + value[-4:]
 
 
 for key in KEYS:
