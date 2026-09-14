@@ -7,7 +7,6 @@ import pytest
 
 from app import main
 
-
 # --- redact -----------------------------------------------------------------
 
 def test_redact_empty():
